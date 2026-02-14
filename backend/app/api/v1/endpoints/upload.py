@@ -2,9 +2,10 @@
 File Upload Endpoints
 """
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from typing import Optional
+from datetime import datetime
 import structlog
 from app.services.csv_processor import csv_processor
 from app.services.vulnerability_service import vulnerability_service
@@ -37,17 +38,18 @@ async def upload_csv(
     """
     try:
         # Validate file type
-        if not file.content_type in ['text/csv', 'application/vnd.ms-excel']:
+        if not (file.content_type in ['text/csv', 'application/vnd.ms-excel', 'text/plain'] or 
+                file.filename.endswith(('.csv', '.xlsx'))):
             raise HTTPException(
                 status_code=400,
-                detail="Invalid file type. Please upload a CSV file."
+                detail="Invalid file type. Please upload a CSV or Excel file."
             )
         
         # Validate scan type
-        if scan_type.lower() not in ['wazuh', 'openvas']:
+        if scan_type.lower() not in ['wazuh', 'openvas', 'manual']:
             raise HTTPException(
                 status_code=400,
-                detail="Invalid scan type. Supported types: wazuh, openvas"
+                detail="Invalid scan type. Supported types: wazuh, openvas, manual"
             )
         
         # Read file content

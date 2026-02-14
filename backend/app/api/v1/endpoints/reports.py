@@ -3,13 +3,16 @@ Report Generation Endpoints
 """
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from typing import Optional, List
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 import structlog
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
+import io
+import csv
 from app.core.database import get_db
 from app.models.vulnerability import Report, Vulnerability, Scan, Asset
 from app.services.report_service import report_service
@@ -362,3 +365,83 @@ async def delete_report(
     except Exception as e:
         logger.error("Failed to delete report", report_id=report_id, error=str(e))
         raise HTTPException(status_code=500, detail="Failed to delete report")
+
+
+@router.get("/export/scan/{scan_id}")
+async def export_scan_csv(scan_id: int, db: Session = Depends(get_db)):
+    """
+    Export vulnerabilities for a specific scan as CSV (on the fly, no persistence).
+    """
+    try:
+        scan = db.query(Scan).filter(Scan.id == scan_id).first()
+        if not scan:
+            raise HTTPException(status_code=404, detail="Scan not found")
+
+        # Fetch vulnerabilities for this scan
+        from app.models.vulnerability import VulnerabilityFinding
+        vuln_query = (
+            db.query(Vulnerability)
+            .join(VulnerabilityFinding)
+            .join(Scan)
+            .filter(Scan.id == scan_id)
+            .distinct()
+        )
+
+        vulns = vuln_query.all()
+
+        # Findings count per vulnerability within this scan
+        counts = (
+            db.query(VulnerabilityFinding.vulnerability_id, func.count(VulnerabilityFinding.id))
+            .filter(VulnerabilityFinding.scan_id == scan_id)
+            .group_by(VulnerabilityFinding.vulnerability_id)
+            .all()
+        )
+        id_to_count = {vid: cnt for vid, cnt in counts}
+
+        # Build CSV in-memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "CVE ID",
+            "Title",
+            "Description",
+            "CVSS Score",
+            "CVSS Severity",
+            "EPSS Score",
+            "EPSS Percentile",
+            "CPR Score",
+            "CPR Risk Level",
+            "Findings (in scan)",
+            "Last Updated",
+        ])
+
+        for v in vulns:
+            writer.writerow([
+                v.cve_id,
+                (v.title or "")[:500],
+                (v.description or "").replace("\n", " ").replace("\r", " ")[:4000],
+                v.cvss_score or "",
+                v.cvss_severity or "",
+                v.epss_score if v.epss_score is not None else "",
+                v.epss_percentile if v.epss_percentile is not None else "",
+                v.cpr_score if v.cpr_score is not None else "",
+                v.cpr_risk_level or "",
+                id_to_count.get(v.id, 0),
+                v.updated_at.isoformat() if v.updated_at else "",
+            ])
+
+        output.seek(0)
+        filename = f"scan_{scan_id}_vulnerabilities_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to export scan CSV", scan_id=scan_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to export report")

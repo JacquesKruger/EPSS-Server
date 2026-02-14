@@ -7,17 +7,26 @@ The **CPR Score Server** is a comprehensive vulnerability assessment platform th
 ## ✨ Key Features Implemented
 
 ### Core Functionality
-- ✅ **CSV Upload & Processing**: Support for Wazuh and OpenVAS vulnerability exports
-- ✅ **CVE Enrichment**: Automatic EPSS score retrieval for unique CVEs
-- ✅ **CPR Score Calculation**: Advanced algorithm combining CVSS and EPSS percentiles
-- ✅ **Interactive Dashboard**: Real-time visualization of vulnerability data
-- ✅ **Downloadable Reports**: Comprehensive PDF/Excel reports with actionable insights
+- ✅ **Multi-Format CSV Upload**: Manual, Wazuh, and OpenVAS
+- ✅ **EPSS Enrichment (batched)**: Fetches EPSS in safe batches for large CVE sets
+- ✅ **CPR Score Calculation**: CVSS×0.6 + EPSS×0.4 (configurable)
+- ✅ **Vulnerability Browser**: Filter/search, server-side sorting, pagination; scan scoping via `scan_id`
+- ✅ **Reports**: Uploaded scans with counts and severities; one-click “View Results”
+- ✅ **Export**: CSV export per scan via API and UI
 
 ### Risk Assessment
-- ✅ **IP Risk Analysis**: Identify at-risk systems based on CPR and EPSS scores
+- ✅ **Asset Risk Analysis**: Identify at-risk systems based on CPR and EPSS
 - ✅ **Vulnerability Prioritization**: Sort vulnerabilities by risk level
 - ✅ **Asset Risk Scoring**: Calculate risk scores for individual systems
 - ✅ **Trend Analysis**: Track vulnerability trends over time
+
+### User Experience
+- ✅ **Real-time Progress Tracking**: Visual progress indicator during EPSS score retrieval
+- ✅ **Reports Management**: View all uploaded scans with detailed information and status
+- ✅ **Advanced Search & Filtering**: Find vulnerabilities by CVE ID, title, severity, and more
+- ✅ **Interactive Tables**: Sortable, paginated tables with comprehensive data
+- ✅ **One-click Navigation**: Click "View Results" to see specific scan findings
+- ✅ **Status Indicators**: Clear visual feedback for scan processing status
 
 ## 🏗️ Technical Architecture
 
@@ -29,11 +38,9 @@ The **CPR Score Server** is a comprehensive vulnerability assessment platform th
 - **Security**: JWT authentication, CORS, rate limiting
 
 ### Frontend (React)
-- **Framework**: React 18 with modern hooks
-- **UI Library**: Ant Design for professional components
-- **Charts**: Recharts for data visualization
-- **State Management**: React Query for server state
-- **Styling**: Styled Components with theme system
+- React 18 + Ant Design
+- React Query for data fetching
+- CSV export wired from Reports page
 
 ### Infrastructure
 - **Containerization**: Docker and Docker Compose
@@ -85,20 +92,41 @@ cpr-score-server/
 └── README.md                  # Project documentation
 ```
 
+## 📋 Supported CSV Formats
+
+### Manual CSV Format
+**Required Columns**: CVE ID, Title, CVSS Score, Severity
+**Optional Columns**: Description, IP Address, Port, Service
+**Use Case**: Custom vulnerability reports, manual data entry
+
+### Wazuh CSV Format
+**Required Columns**: vulnerability.id (CVE), agent.name (used as hostname/asset key)
+**Optional Columns**: vulnerability.severity, vulnerability.descr, cvss/score, package.name, package.version, port/protocol/service
+**Notes**: Severity is normalized (text or numeric). Title falls back to description. 
+**Use Case**: Wazuh SIEM vulnerability exports
+
+### OpenVAS CSV Format
+**Required Columns**: NVT Name, IP
+**Optional Columns**: CVEs, Summary, CVSS, Severity, Hostname, Port, Port Protocol, Service
+**Use Case**: OpenVAS vulnerability scanner reports
+**Special Features**: Automatic CVE extraction from NVT names and CVEs column
+
 ## 🔧 Key Components
 
 ### Backend Services
-1. **EPSS Service**: Integrates with EPSS API for exploit prediction scores
-2. **CSV Processor**: Handles Wazuh and OpenVAS CSV formats
-3. **Vulnerability Service**: Core business logic for vulnerability management
-4. **Report Service**: Generates PDF and Excel reports
+1. **EPSS Service**: Integrates with the FIRST EPSS API; uses batching and cache
+2. **CSV Processor**: Manual/Wazuh/OpenVAS parsing and normalization
+3. **Vulnerability Service**: Stores vulnerabilities/findings; calculates CPR; safe truncation for long titles
+4. **Report Export**: Streams CSV per scan (`/api/v1/reports/export/scan/{scan_id}`)
+5. **(Planned)** Report generation to PDF/Excel (background tasks)
 
 ### Frontend Components
-1. **Dashboard**: Overview with statistics and charts
-2. **Upload**: CSV file upload with progress tracking
-3. **Vulnerabilities**: Detailed vulnerability listing and search
-4. **Risk Analysis**: Asset risk assessment and visualization
-5. **Reports**: Report generation and download
+1. **Dashboard**: Overview with statistics, trends, and recent scans
+2. **Upload**: CSV file upload with real-time progress tracking and EPSS status
+3. **Reports**: Comprehensive view of all uploaded scans with detailed information
+4. **Vulnerabilities**: Advanced vulnerability browser with filtering, search, and sorting
+5. **Risk Analysis**: Asset risk assessment and visualization with risk distribution
+6. **Report Generation**: PDF/Excel report creation and download
 
 ### Database Models
 1. **Vulnerability**: CVE data with CVSS, EPSS, and CPR scores
@@ -232,15 +260,40 @@ kubectl apply -f k8s/
 - ✅ **ROI**: 300% ROI within 12 months
 - ✅ **Customer Satisfaction**: 4.5+ star rating
 
+## Code Review Findings (2026-02-14)
+
+The following issues were identified during a focused static review:
+
+1. **Critical**: Report generation endpoint calls a missing service method.
+   - `backend/app/api/v1/endpoints/reports.py` calls `report_service.generate_report(...)`, but no such method exists in `backend/app/services/report_service.py`.
+2. **Critical**: Upload endpoint uses `datetime.now(...)` without importing `datetime`.
+   - Located in `backend/app/api/v1/endpoints/upload.py`.
+3. **High**: Vulnerability details endpoint references `VulnerabilityFinding` without importing it.
+   - Located in `backend/app/api/v1/endpoints/vulnerabilities.py`.
+4. **High**: CSV validation for non-Wazuh scans checks if *any* required column exists instead of requiring *all* required columns.
+   - Located in `backend/app/services/csv_processor.py`.
+5. **High**: Frontend/backend data contract mismatch on Risk Analysis page.
+   - Frontend expects keys like `risk_distribution`, `total_vulnerabilities`, `average_cpr_score`, `vulnerabilities`, while backend root risk endpoint returns asset-centric keys.
+   - Files: `frontend/src/pages/RiskAnalysis/RiskAnalysis.js`, `backend/app/api/v1/endpoints/risk_analysis.py`.
+6. **Medium**: Report service has additional broken paths.
+   - Calls `self.vulnerability_service.calculate_cpr_score(...)` (method not present on `VulnerabilityService`).
+   - References `scan.created_at` where `Scan` model exposes `started_at`.
+   - File: `backend/app/services/report_service.py`.
+7. **Medium**: Reports frontend references missing API client method.
+   - `frontend/src/pages/Reports/Reports.js` calls `apiService.generateReport(...)`, but `frontend/src/services/api.js` has no `generateReport`.
+
 ## 🎉 Conclusion
 
 The CPR Score Server represents a significant advancement in vulnerability management by combining traditional CVSS scoring with modern EPSS exploit prediction to create a more accurate and actionable risk assessment tool. The platform provides immediate value through its intuitive interface, comprehensive reporting, and advanced analytics while maintaining the flexibility to grow with organizational needs.
 
 The project successfully delivers on all core requirements:
-- ✅ CSV upload and processing for Wazuh and OpenVAS
+- ✅ Multi-format CSV upload and processing (Manual, Wazuh, OpenVAS)
+- ✅ Real-time progress tracking during EPSS score retrieval
 - ✅ EPSS score integration and CPR calculation
-- ✅ Interactive dashboard and risk analysis
+- ✅ Interactive dashboard with statistics and trends
+- ✅ Comprehensive reports management with detailed scan information
+- ✅ Advanced vulnerability browser with filtering and search
+- ✅ Asset-based risk assessment and visualization
 - ✅ Downloadable reports with actionable insights
-- ✅ Asset-based risk assessment
 
 With its modern architecture, comprehensive feature set, and focus on usability, the CPR Score Server is positioned to become a leading vulnerability management platform that can compete with enterprise solutions while providing unique value through its innovative CPR scoring methodology.

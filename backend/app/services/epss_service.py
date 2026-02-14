@@ -87,31 +87,29 @@ class EPPSService:
         # We'll fetch the latest available data
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # Get latest EPSS data
-                params = {
-                    'cve': ','.join(cve_ids),
-                    'format': 'json'
-                }
-                
-                if self.api_key:
-                    params['key'] = self.api_key
-                
-                response = await client.get(f"{self.base_url}", params=params)
-                response.raise_for_status()
-                
-                data = response.json()
-                
-                # Parse EPSS response
-                if 'data' in data:
-                    for item in data['data']:
-                        cve_id = item.get('cve')
-                        if cve_id:
-                            results[cve_id] = {
-                                'epss_score': float(item.get('epss', 0)),
-                                'percentile': float(item.get('percentile', 0)),
-                                'date': item.get('date'),
-                                'status': 'success'
-                            }
+                # The EPSS API and URL length impose practical limits; batch requests
+                batch_size = 200
+                for i in range(0, len(cve_ids), batch_size):
+                    batch = cve_ids[i:i + batch_size]
+                    params = {
+                        'cve': ','.join(batch),
+                        'format': 'json'
+                    }
+                    if self.api_key:
+                        params['key'] = self.api_key
+                    response = await client.get(f"{self.base_url}", params=params)
+                    response.raise_for_status()
+                    data = response.json()
+                    if 'data' in data:
+                        for item in data['data']:
+                            cve_id = item.get('cve')
+                            if cve_id:
+                                results[cve_id] = {
+                                    'epss_score': float(item.get('epss', 0) or 0),
+                                    'percentile': float(item.get('percentile', 0) or 0),
+                                    'date': item.get('date'),
+                                    'status': 'success'
+                                }
                 
                 # Handle CVEs not found in EPSS
                 for cve_id in cve_ids:

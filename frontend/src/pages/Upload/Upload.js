@@ -1,293 +1,217 @@
-import React, { useState } from 'react';
-import { Card, Upload, Button, Form, Select, Input, message, Progress, List, Typography, Space, Tag } from 'antd';
-import { InboxOutlined, UploadOutlined, FileTextOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
-import { useMutation, useQuery } from 'react-query';
-import styled from 'styled-components';
-import { motion } from 'framer-motion';
+import React, { useState, useEffect } from 'react';
+import { Card, Typography, Upload as AntUpload, Button, message, Form, Select, Input, Progress, Alert } from 'antd';
+import { UploadOutlined, CheckCircleOutlined, LoadingOutlined } from '@ant-design/icons';
 import { apiService } from '../../services/api';
 
-const { Dragger } = Upload;
+const { Title } = Typography;
 const { Option } = Select;
-const { Text, Title } = Typography;
-
-const UploadContainer = styled.div`
-  .upload-section {
-    margin-bottom: ${props => props.theme.spacing.xl};
-  }
-
-  .upload-form {
-    .ant-form-item {
-      margin-bottom: ${props => props.theme.spacing.lg};
-    }
-  }
-
-  .scan-status {
-    .ant-list-item {
-      padding: ${props => props.theme.spacing.md};
-      border-radius: ${props => props.theme.borderRadius.md};
-      margin-bottom: ${props => props.theme.spacing.sm};
-    }
-  }
-`;
-
-const UploadCard = styled(Card)`
-  .ant-upload-drag {
-    border: 2px dashed ${props => props.theme.colors.border};
-    border-radius: ${props => props.theme.borderRadius.md};
-    background: ${props => props.theme.colors.background};
-    transition: all 0.3s ease;
-
-    &:hover {
-      border-color: ${props => props.theme.colors.primary};
-      background: ${props => props.theme.colors.surface};
-    }
-  }
-
-  .ant-upload-drag-icon {
-    color: ${props => props.theme.colors.primary};
-    font-size: 48px;
-  }
-
-  .ant-upload-text {
-    color: ${props => props.theme.colors.text};
-    font-size: ${props => props.theme.typography.fontSize.lg};
-    font-weight: ${props => props.theme.typography.fontWeight.medium};
-  }
-
-  .ant-upload-hint {
-    color: ${props => props.theme.colors.textSecondary};
-  }
-`;
 
 const Upload = () => {
-  const [form] = Form.useForm();
+  const [fileList, setFileList] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatus, setUploadStatus] = useState('');
+  const [currentScanId, setCurrentScanId] = useState(null);
+  const [form] = Form.useForm();
 
-  // Fetch recent scans
-  const { data: scans, refetch: refetchScans } = useQuery(
-    'scans',
-    apiService.getScans,
-    {
-      refetchInterval: 5000, // Refetch every 5 seconds to check scan status
+  const handleFileChange = (info) => {
+    const { file, fileList: newFileList } = info;
+    
+    // Validate file type
+    const isValidType = file.type === 'text/csv' || 
+                       file.type === 'application/vnd.ms-excel' ||
+                       file.name.endsWith('.csv') || 
+                       file.name.endsWith('.xlsx');
+    
+    if (!isValidType) {
+      message.error('Please upload a CSV or Excel file.');
+      setFileList([]);
+      return;
     }
-  );
 
-  // Upload mutation
-  const uploadMutation = useMutation(apiService.uploadCSV, {
-    onSuccess: (data) => {
-      message.success('File uploaded successfully! Processing in background...');
-      form.resetFields();
-      setUploading(false);
-      setUploadProgress(0);
-      refetchScans();
-    },
-    onError: (error) => {
-      message.error(`Upload failed: ${error.message}`);
-      setUploading(false);
-      setUploadProgress(0);
-    },
-  });
+    setFileList(newFileList);
+  };
 
-  const handleUpload = async (file, values) => {
-    setUploading(true);
-    setUploadProgress(0);
+  const beforeUpload = () => {
+    return false; // Prevent auto upload
+  };
 
+  const checkScanStatus = async (scanId) => {
     try {
-      // Simulate progress
-      const progressInterval = setInterval(() => {
-        setUploadProgress(prev => {
-          if (prev >= 90) {
-            clearInterval(progressInterval);
-            return 90;
-          }
-          return prev + 10;
-        });
-      }, 200);
-
-      await uploadMutation.mutateAsync({
-        file,
-        scan_type: values.scan_type,
-        scan_name: values.scan_name,
-      });
-
-      clearInterval(progressInterval);
-      setUploadProgress(100);
+      const response = await apiService.getDashboardData();
+      const scan = response.recent_scans?.find(s => s.scan_id === scanId);
+      
+      if (scan) {
+        if (scan.status === 'completed') {
+          setUploadProgress(100);
+          setUploadStatus('completed');
+          setUploading(false);
+          message.success(`File processed successfully! Scan ID: ${scanId}`);
+          setFileList([]);
+          form.resetFields();
+          setCurrentScanId(null);
+        } else if (scan.status === 'failed') {
+          setUploadProgress(0);
+          setUploadStatus('failed');
+          setUploading(false);
+          message.error(`Processing failed: ${scan.error_message || 'Unknown error'}`);
+          setCurrentScanId(null);
+        } else if (scan.status === 'processing') {
+          // Estimate progress based on time elapsed
+          const startTime = new Date(scan.started_at);
+          const elapsed = Date.now() - startTime.getTime();
+          const estimatedProgress = Math.min(90, Math.floor(elapsed / 1000) * 10); // 10% per second, max 90%
+          setUploadProgress(estimatedProgress);
+          setUploadStatus('processing');
+          
+          // Continue checking
+          setTimeout(() => checkScanStatus(scanId), 2000);
+        }
+      }
     } catch (error) {
-      clearInterval(progressInterval);
-      throw error;
+      console.error('Failed to check scan status:', error);
+      setUploadStatus('error');
+      setUploading(false);
     }
   };
 
-  const customRequest = async ({ file, onSuccess, onError }) => {
+  const handleSubmit = async () => {
+    if (fileList.length === 0) {
+      message.error('Please select a file to upload.');
+      return;
+    }
+
     try {
+      setUploading(true);
+      setUploadProgress(0);
+      setUploadStatus('uploading');
       const values = await form.validateFields();
-      await handleUpload(file, values);
-      onSuccess();
+      
+      // Simulate upload progress
+      setUploadProgress(20);
+      setUploadStatus('uploading');
+      
+      const response = await apiService.uploadFile(
+        fileList[0].originFileObj || fileList[0], 
+        values.scan_type, 
+        values.scan_name
+      );
+      
+      setUploadProgress(50);
+      setUploadStatus('processing');
+      setCurrentScanId(response.scan_id);
+      
+      message.info(`File uploaded! Processing scan ID: ${response.scan_id}`);
+      
+      // Start checking scan status
+      setTimeout(() => checkScanStatus(response.scan_id), 1000);
+      
     } catch (error) {
-      onError(error);
+      console.error('Upload error:', error);
+      message.error('Failed to upload file. Please try again.');
+      setUploading(false);
+      setUploadProgress(0);
+      setUploadStatus('');
     }
   };
 
-  const getStatusColor = (status) => {
-    switch (status) {
-      case 'completed':
-        return 'success';
-      case 'processing':
-        return 'processing';
-      case 'failed':
-        return 'error';
-      default:
-        return 'default';
-    }
-  };
-
-  const getStatusIcon = (status) => {
-    switch (status) {
-      case 'completed':
-        return <CheckCircleOutlined />;
-      case 'processing':
-        return <FileTextOutlined />;
-      case 'failed':
-        return <CloseCircleOutlined />;
-      default:
-        return <FileTextOutlined />;
-    }
+  const uploadProps = {
+    name: 'file',
+    multiple: false,
+    accept: '.csv,.xlsx',
+    beforeUpload: beforeUpload,
+    onChange: handleFileChange,
+    fileList,
+    onRemove: () => setFileList([]),
   };
 
   return (
-    <UploadContainer>
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-      >
-        <Title level={2}>Upload Vulnerability Data</Title>
-        <Text type="secondary">
-          Upload CSV files from Wazuh or OpenVAS vulnerability scanners
-        </Text>
-      </motion.div>
-
-      <div className="upload-section">
-        <UploadCard>
-          <Form
-            form={form}
-            layout="vertical"
-            className="upload-form"
-            initialValues={{
-              scan_type: 'wazuh',
-            }}
+    <Card>
+      <Title level={2}>Upload Vulnerability Data</Title>
+      <p>Upload CSV or Excel files containing vulnerability scan results.</p>
+      
+      <Form form={form} layout="vertical" style={{ marginTop: 24 }}>
+        <Form.Item
+          label="Scan Type"
+          name="scan_type"
+          rules={[{ required: true, message: 'Please select a scan type' }]}
+        >
+          <Select placeholder="Select scan type">
+            <Option value="wazuh">Wazuh</Option>
+            <Option value="openvas">OpenVAS</Option>
+            <Option value="manual">Manual</Option>
+          </Select>
+        </Form.Item>
+        
+        <Form.Item
+          label="Scan Name (Optional)"
+          name="scan_name"
+        >
+          <Input placeholder="Enter a name for this scan" />
+        </Form.Item>
+        
+        <Form.Item label="File">
+          <AntUpload {...uploadProps}>
+            <Button icon={<UploadOutlined />}>Select File</Button>
+          </AntUpload>
+        </Form.Item>
+        
+        <Form.Item>
+          <Button 
+            type="primary" 
+            onClick={handleSubmit}
+            loading={uploading}
+            disabled={fileList.length === 0}
           >
-            <Form.Item
-              name="scan_type"
-              label="Scanner Type"
-              rules={[{ required: true, message: 'Please select scanner type' }]}
-            >
-              <Select placeholder="Select scanner type">
-                <Option value="wazuh">Wazuh</Option>
-                <Option value="openvas">OpenVAS</Option>
-              </Select>
-            </Form.Item>
+            Upload File
+          </Button>
+        </Form.Item>
+      </Form>
 
-            <Form.Item
-              name="scan_name"
-              label="Scan Name (Optional)"
-            >
-              <Input placeholder="Enter a name for this scan" />
-            </Form.Item>
-
-            <Form.Item
-              name="file"
-              label="CSV File"
-              rules={[{ required: true, message: 'Please upload a CSV file' }]}
-            >
-              <Dragger
-                name="file"
-                multiple={false}
-                accept=".csv"
-                customRequest={customRequest}
-                disabled={uploading}
-                showUploadList={false}
-              >
-                <p className="ant-upload-drag-icon">
-                  <InboxOutlined />
-                </p>
-                <p className="ant-upload-text">
-                  Click or drag CSV file to this area to upload
-                </p>
-                <p className="ant-upload-hint">
-                  Support for single CSV file upload. Maximum file size: 50MB
-                </p>
-              </Dragger>
-            </Form.Item>
-
-            {uploading && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-              >
-                <Progress
-                  percent={uploadProgress}
-                  status={uploadProgress === 100 ? 'success' : 'active'}
-                  strokeColor={{
-                    '0%': '#108ee9',
-                    '100%': '#87d068',
-                  }}
-                />
-              </motion.div>
+      {/* Progress Indicator */}
+      {uploading && (
+        <Card style={{ marginTop: 16 }}>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+              {uploadStatus === 'completed' ? (
+                <CheckCircleOutlined style={{ color: '#52c41a', marginRight: 8 }} />
+              ) : (
+                <LoadingOutlined style={{ color: '#1890ff', marginRight: 8 }} />
+              )}
+              <strong>
+                {uploadStatus === 'uploading' && 'Uploading file...'}
+                {uploadStatus === 'processing' && 'Processing file and retrieving EPSS scores...'}
+                {uploadStatus === 'completed' && 'Processing completed!'}
+                {uploadStatus === 'failed' && 'Processing failed'}
+              </strong>
+            </div>
+            <Progress 
+              percent={uploadProgress} 
+              status={uploadStatus === 'failed' ? 'exception' : uploadStatus === 'completed' ? 'success' : 'active'}
+              strokeColor={{
+                '0%': '#108ee9',
+                '100%': '#87d068',
+              }}
+            />
+            {currentScanId && (
+              <div style={{ marginTop: 8, fontSize: '12px', color: '#666' }}>
+                Scan ID: {currentScanId}
+              </div>
             )}
-          </Form>
-        </UploadCard>
-      </div>
-
-      {/* Recent Scans */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-      >
-        <Card title="Recent Scans" className="scan-status">
-          <List
-            dataSource={scans?.scans || []}
-            renderItem={(scan) => (
-              <List.Item>
-                <List.Item.Meta
-                  avatar={getStatusIcon(scan.status)}
-                  title={
-                    <Space>
-                      <Text strong>{scan.name}</Text>
-                      <Tag color={getStatusColor(scan.status)}>
-                        {scan.status.toUpperCase()}
-                      </Tag>
-                    </Space>
-                  }
-                  description={
-                    <Space direction="vertical" size="small">
-                      <Text type="secondary">
-                        Type: {scan.scan_type.toUpperCase()} | 
-                        Findings: {scan.total_findings || 0} | 
-                        CVEs: {scan.unique_cves || 0}
-                      </Text>
-                      <Text type="secondary">
-                        Started: {new Date(scan.started_at).toLocaleString()}
-                        {scan.completed_at && (
-                          <> | Completed: {new Date(scan.completed_at).toLocaleString()}</>
-                        )}
-                      </Text>
-                      {scan.error_message && (
-                        <Text type="danger">{scan.error_message}</Text>
-                      )}
-                    </Space>
-                  }
-                />
-              </List.Item>
-            )}
-            locale={{ emptyText: 'No scans found' }}
-          />
+          </div>
+          
+          {uploadStatus === 'processing' && (
+            <Alert
+              message="EPSS Score Retrieval"
+              description="We're currently retrieving EPSS (Exploit Prediction Scoring System) scores for the vulnerabilities in your file. This process may take a few moments as we fetch the latest data from the EPSS database."
+              type="info"
+              showIcon
+              style={{ marginTop: 16 }}
+            />
+          )}
         </Card>
-      </motion.div>
-    </UploadContainer>
+      )}
+    </Card>
   );
 };
 

@@ -11,8 +11,8 @@ import uvicorn
 
 from app.api.v1.api import api_router
 from app.core.config import settings
-from app.core.database import engine
-from app.models import Base
+from app.core.database import engine, Base
+from app.models import vulnerability  # Import models to register them
 
 # Configure structured logging
 structlog.configure(
@@ -72,8 +72,7 @@ async def startup_event():
     logger.info("Starting CPR Score Server", version="1.0.0")
     
     # Create database tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    Base.metadata.create_all(bind=engine)
     
     logger.info("Database tables created successfully")
 

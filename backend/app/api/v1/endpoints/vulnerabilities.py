@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 import structlog
 from app.core.database import get_db
 from app.services.vulnerability_service import vulnerability_service
-from app.models.vulnerability import Vulnerability
+from app.models.vulnerability import Vulnerability, VulnerabilityFinding
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -17,10 +17,16 @@ logger = structlog.get_logger()
 @router.get("/")
 async def get_vulnerabilities(
     skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    # limit = -1 means "return all"
+    limit: int = Query(100, ge=-1, le=10000),
     risk_level: Optional[str] = Query(None),
     min_cpr_score: Optional[float] = Query(None, ge=0, le=100),
     cve_id: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    severity: Optional[str] = Query(None),
+    scan_id: Optional[int] = Query(None),
+    sort_by: Optional[str] = Query("cpr_score"),
+    sort_order: Optional[str] = Query("desc"),
     db: Session = Depends(get_db)
 ):
     """
@@ -61,14 +67,112 @@ async def get_vulnerabilities(
                 }
             }
         else:
-            # Get vulnerabilities with filters
-            result = await vulnerability_service.get_vulnerabilities_with_cpr_scores(
-                skip=skip,
-                limit=limit,
-                risk_level=risk_level,
-                min_cpr_score=min_cpr_score
-            )
-            return result
+            # Get all vulnerabilities with basic filters
+            query = db.query(Vulnerability)
+            
+            # Apply filters
+            if risk_level:
+                query = query.filter(Vulnerability.cvss_severity.ilike(f"%{risk_level}%"))
+            
+            if severity:
+                query = query.filter(Vulnerability.cvss_severity.ilike(f"%{severity}%"))
+            
+            if min_cpr_score:
+                query = query.filter(Vulnerability.cpr_score >= min_cpr_score)
+            
+            if search:
+                from sqlalchemy import or_
+                query = query.filter(
+                    or_(
+                        Vulnerability.cve_id.ilike(f"%{search}%"),
+                        Vulnerability.title.ilike(f"%{search}%"),
+                        Vulnerability.description.ilike(f"%{search}%")
+                    )
+                )
+            
+            # Filter by scan_id if provided
+            if scan_id:
+                from app.models.vulnerability import VulnerabilityFinding, Scan
+                # Get vulnerabilities that have findings in the specified scan
+                # Use subquery to avoid duplicates from JOIN
+                subquery = db.query(VulnerabilityFinding.vulnerability_id).join(Scan).filter(Scan.id == scan_id).subquery()
+                query = query.filter(Vulnerability.id.in_(subquery))
+            
+            # Apply sorting
+            if sort_by == "cpr_score":
+                if sort_order == "asc":
+                    query = query.order_by(Vulnerability.cpr_score.asc().nulls_last())
+                else:
+                    query = query.order_by(Vulnerability.cpr_score.desc().nulls_last())
+            elif sort_by == "cvss_score":
+                if sort_order == "asc":
+                    query = query.order_by(Vulnerability.cvss_score.asc().nulls_last())
+                else:
+                    query = query.order_by(Vulnerability.cvss_score.desc().nulls_last())
+            elif sort_by == "epss_score":
+                if sort_order == "asc":
+                    query = query.order_by(Vulnerability.epss_score.asc().nulls_last())
+                else:
+                    query = query.order_by(Vulnerability.epss_score.desc().nulls_last())
+            elif sort_by == "cve_id":
+                if sort_order == "asc":
+                    query = query.order_by(Vulnerability.cve_id.asc())
+                else:
+                    query = query.order_by(Vulnerability.cve_id.desc())
+            else:
+                # Default sorting by CPR Score descending
+                query = query.order_by(Vulnerability.cpr_score.desc().nulls_last())
+            
+            total = query.count()
+            if limit == -1:
+                # Return all matching rows (no pagination)
+                vulnerabilities = query.all()
+            else:
+                vulnerabilities = query.offset(skip).limit(limit).all()
+            
+            # Get findings count for each vulnerability
+            from app.models.vulnerability import VulnerabilityFinding
+            from sqlalchemy import func
+            vuln_ids = [vuln.id for vuln in vulnerabilities]
+            findings_counts = db.query(
+                VulnerabilityFinding.vulnerability_id,
+                func.count(VulnerabilityFinding.id).label('count')
+            ).filter(
+                VulnerabilityFinding.vulnerability_id.in_(vuln_ids)
+            ).group_by(VulnerabilityFinding.vulnerability_id).all()
+            
+            # Create a mapping of vulnerability_id to findings count
+            findings_map = {vf.vulnerability_id: vf.count for vf in findings_counts}
+            
+            # Set findings count for each vulnerability
+            for vuln in vulnerabilities:
+                vuln.findings_count = findings_map.get(vuln.id, 0)
+            
+            return {
+                "vulnerabilities": [
+                    {
+                        "id": vuln.id,
+                        "cve_id": vuln.cve_id,
+                        "title": vuln.title,
+                        "description": vuln.description,
+                        "cvss_score": vuln.cvss_score,
+                        "cvss_severity": vuln.cvss_severity,
+                        "cvss_vector": vuln.cvss_vector,
+                        "epss_score": vuln.epss_score,
+                        "epss_percentile": vuln.epss_percentile,
+                        "cpr_score": vuln.cpr_score,
+                        "cpr_risk_level": vuln.cpr_risk_level,
+                        "created_at": vuln.created_at,
+                        "updated_at": vuln.updated_at,
+                        "last_epss_update": vuln.last_epss_update,
+                        "findings_count": getattr(vuln, 'findings_count', 0)
+                    }
+                    for vuln in vulnerabilities
+                ],
+                "total": total,
+                "skip": skip,
+                "limit": limit
+            }
             
     except HTTPException:
         raise

@@ -16,7 +16,11 @@ logger = structlog.get_logger()
 
 
 @router.get("/")
-async def get_risk_analysis(db: Session = Depends(get_db)):
+async def get_risk_analysis(
+    risk_level: Optional[str] = Query("all"),
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
     """
     Get comprehensive risk analysis
     
@@ -25,8 +29,65 @@ async def get_risk_analysis(db: Session = Depends(get_db)):
     """
     try:
         risk_analysis = await vulnerability_service.get_asset_risk_analysis()
-        return risk_analysis
+
+        vuln_query = db.query(Vulnerability).filter(Vulnerability.cpr_score.isnot(None))
+        normalized_level = (risk_level or "all").lower()
+        if normalized_level == "critical":
+            vuln_query = vuln_query.filter(Vulnerability.cpr_score >= 90)
+        elif normalized_level == "high":
+            vuln_query = vuln_query.filter(Vulnerability.cpr_score >= 70)
+        elif normalized_level == "medium":
+            vuln_query = vuln_query.filter(Vulnerability.cpr_score >= 40)
+        elif normalized_level in ("low", "all"):
+            pass
+        else:
+            raise HTTPException(status_code=400, detail="Invalid risk_level")
+
+        total_vulnerabilities = vuln_query.count()
+        average_cpr_score = vuln_query.with_entities(func.avg(Vulnerability.cpr_score)).scalar() or 0.0
+        vulnerabilities = vuln_query.order_by(desc(Vulnerability.cpr_score).nulls_last()).limit(limit).all()
+
+        vuln_ids = [v.id for v in vulnerabilities]
+        affected_assets_map = {}
+        if vuln_ids:
+            affected_assets = db.query(
+                VulnerabilityFinding.vulnerability_id,
+                func.count(func.distinct(VulnerabilityFinding.ip_address)).label("asset_count"),
+            ).filter(
+                VulnerabilityFinding.vulnerability_id.in_(vuln_ids)
+            ).group_by(
+                VulnerabilityFinding.vulnerability_id
+            ).all()
+            affected_assets_map = {v_id: count for v_id, count in affected_assets}
+
+        risk_distribution = {}
+        for level in ["critical", "high", "medium", "low"]:
+            risk_distribution[level] = db.query(Vulnerability).filter(
+                Vulnerability.cpr_risk_level == level
+            ).count()
+
+        return {
+            **risk_analysis,
+            "risk_distribution": risk_distribution,
+            "total_vulnerabilities": total_vulnerabilities,
+            "average_cpr_score": round(float(average_cpr_score), 2),
+            "vulnerabilities": [
+                {
+                    "id": vuln.id,
+                    "cve_id": vuln.cve_id,
+                    "title": vuln.title,
+                    "cpr_risk_level": vuln.cpr_risk_level,
+                    "cpr_score": vuln.cpr_score,
+                    "cvss_score": vuln.cvss_score,
+                    "epss_score": vuln.epss_score,
+                    "affected_assets": affected_assets_map.get(vuln.id, 0),
+                }
+                for vuln in vulnerabilities
+            ],
+        }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Failed to get risk analysis", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to retrieve risk analysis")

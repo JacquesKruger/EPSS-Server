@@ -221,12 +221,7 @@ The API documentation is available at `/docs` when running the backend server. K
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🆘 Support
 
-For support and questions:
-- Create an issue in the repository
-- Contact: [your-email@domain.com]
-- Documentation: [link-to-docs]
 
 ## 🔮 Roadmap
 
